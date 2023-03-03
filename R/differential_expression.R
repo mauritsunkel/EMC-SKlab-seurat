@@ -488,29 +488,28 @@ FindConservedMarkers <- function(
 #' @method FindMarkers default
 #'
 FindMarkers.default <- function(
-  object,
-  slot = "data",
-  counts = numeric(),
-  cells.1 = NULL,
-  cells.2 = NULL,
-  features = NULL,
-  logfc.threshold = 0.25,
-  test.use = 'wilcox',
-  min.pct = 0.1,
-  min.diff.pct = -Inf,
-  verbose = TRUE,
-  only.pos = FALSE,
-  max.cells.per.ident = Inf,
-  random.seed = 1,
-  latent.vars = NULL,
-  min.cells.feature = 3,
-  min.cells.group = 3,
-  pseudocount.use = 1,
-  fc.results = NULL,
-  densify = FALSE,
-  ...
+    object,
+    slot = "data",
+    counts = numeric(),
+    cells.1 = NULL,
+    cells.2 = NULL,
+    features = NULL,
+    logfc.threshold = 0.25,
+    test.use = 'wilcox',
+    min.pct = 0.1,
+    min.diff.pct = -Inf,
+    verbose = TRUE,
+    only.pos = FALSE,
+    max.cells.per.ident = Inf,
+    random.seed = 1,
+    latent.vars = NULL,
+    min.cells.feature = 3,
+    min.cells.group = 3,
+    pseudocount.use = 1,
+    fc.results = NULL,
+    densify = FALSE,
+    ...
 ) {
-  pseudocount.use <- pseudocount.use %||% 1
   ValidateCellGroups(
     object = object,
     cells.1 = cells.1,
@@ -598,6 +597,15 @@ FindMarkers.default <- function(
       method = "bonferroni",
       n = nrow(x = object)
     )
+    # MY CUSTOM CODE: also perform Bonferroni correction for non-zero expression DE data
+    message("WARNING: Running custom extended Seurat:::FindMarkers.default...")
+    de.results$nz_p_val_adj = p.adjust(
+      p = de.results$nz_p_val,
+      method = "bonferroni",
+      n = nrow(x = object)
+    )
+    # sort table column names
+    de.results <- de.results[,c(1, 13, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 2, 14)]
   }
   return(de.results)
 }
@@ -1035,34 +1043,68 @@ FindMarkers.Seurat <- function(
 #' @concept differential_expression
 #' @export
 #' @method FoldChange default
-FoldChange.default <- function(
-  object,
-  cells.1,
-  cells.2,
-  mean.fxn,
-  fc.name,
-  features = NULL,
-  ...
-) {
+FoldChange.default <- function(object, cells.1, cells.2, mean.fxn, fc.name, mean.fxn.adj = mean.fxn.adj, features = NULL, ...)
+{
   features <- features %||% rownames(x = object)
-  # Calculate percent expressed
   thresh.min <- 0
-  pct.1 <- round(
-    x = rowSums(x = object[features, cells.1, drop = FALSE] > thresh.min) /
-      length(x = cells.1),
-    digits = 3
-  )
-  pct.2 <- round(
-    x = rowSums(x = object[features, cells.2, drop = FALSE] > thresh.min) /
-      length(x = cells.2),
-    digits = 3
-  )
-  # Calculate fold change
+  pct.1 <- round(x = rowSums(x = object[features, cells.1,
+                                        drop = FALSE] > thresh.min)/length(x = cells.1), digits = 3)
+  pct.2 <- round(x = rowSums(x = object[features, cells.2,
+                                        drop = FALSE] > thresh.min)/length(x = cells.2), digits = 3)
   data.1 <- mean.fxn(object[features, cells.1, drop = FALSE])
   data.2 <- mean.fxn(object[features, cells.2, drop = FALSE])
   fc <- (data.1 - data.2)
-  fc.results <- as.data.frame(x = cbind(fc, pct.1, pct.2))
-  colnames(fc.results) <- c(fc.name, "pct.1", "pct.2")
+
+  ### MY INJECTED CUSTOM CODE
+  message("WARNING: Running custom extended Seurat:::FoldChange.default...")
+  n_nonzero.1 <- rowSums(x = object[features, cells.1, drop = FALSE] > 0)
+  n_nonzero.2 <- rowSums(x = object[features, cells.2, drop = FALSE] > 0)
+  object[object==0] <- NA
+
+  # Seurat code
+  mean.fxn <- mean.fxn %||% switch(
+    EXPR = slot,
+    'data' = function(x) {
+      return(log(x = rowMeans(x = expm1(x = x)) + pseudocount.use, base = base))
+    },
+    'scale.data' = rowMeans,
+    function(x) {
+      return(log(x = rowMeans(x = x) + pseudocount.use, base = base))
+    }
+  )
+
+
+
+  ## Custom code for temporary custom mean.fxn.adj to calculate proper rowMeans for non-zero expressing cells
+  # added: na.rm = TRUE, such that 0's not taken into account for row means
+  # pseudocount.use = 1, base = 2, hardcoded because of namespace issues
+  mean.fxn.adj <- function (x)
+  {
+    return(log(x = mean(x = expm1(x = x), na.rm = T) + 1,
+               base = 2))
+  }
+  mean.fxn.adj <- mean.fxn.adj %||% switch(
+    EXPR = slot,
+    'data' = function(x) {
+      return(log(x = mean(x = expm1(x = x), na.rm = T) + 1, base = 2))
+    },
+    'scale.data' = rowMeans,
+    function(x) {
+      return(log(x = mean(x = x, na.rm = T) + 1, base = 2))
+    }
+  )
+  nonzero_data.1 <- apply(object[features, cells.1, drop = FALSE], 1, mean.fxn.adj)
+  nonzero_data.2 <- apply(object[features, cells.2, drop = FALSE], 1, mean.fxn.adj)
+  nonzero_fc <- (nonzero_data.1 - nonzero_data.2)
+  nonzero_fc[is.na(nonzero_fc)] <- 0
+
+  # ADJUSTED by adding: nonzero_fc, n_nonzero.1, n_nonzero.2
+  fc.results <- as.data.frame(x = cbind(fc, pct.1, pct.2, data.1, data.2, nonzero_fc, n_nonzero.1, n_nonzero.2,
+                                        nonzero_data.1, nonzero_data.2))
+  # ADJUSTED by adding: "nz_log_fc", "n_nz.1", "n_nz.2"
+  colnames(fc.results) <- c(fc.name, "pct.1", "pct.2", "meanExpr.1", "meanExpr.2",
+                            paste0("nz_", fc.name), "nz_n.1", "nz_n.2", "nz_meanExpr.1", "nz_meanExpr.2")
+
   return(fc.results)
 }
 
@@ -2277,46 +2319,41 @@ ValidateCellGroups <- function(
 # WilcoxDETest(pbmc_small, cells.1 = WhichCells(object = pbmc_small, idents = 1),
 #             cells.2 = WhichCells(object = pbmc_small, idents = 2))
 #
-WilcoxDETest <- function(
-  data.use,
-  cells.1,
-  cells.2,
-  verbose = TRUE,
-  ...
-) {
+WilcoxDETest <- function (data.use, cells.1, cells.2, verbose = TRUE, ...)
+{
+  # save data.use for non-zero calculation in case it is filtered too much beforehand
+  data.use.orig <- data.use
+
+  # use only data needed for group comparison
   data.use <- data.use[, c(cells.1, cells.2), drop = FALSE]
+  # create sequential index of group 1 cells
   j <- seq_len(length.out = length(x = cells.1))
-  my.sapply <- ifelse(
-    test = verbose && nbrOfWorkers() == 1,
-    yes = pbsapply,
-    no = future_sapply
-  )
-  overflow.check <- ifelse(
-    test = is.na(x = suppressWarnings(length(x = data.use[1, ]) * length(x = data.use[1, ]))),
-    yes = FALSE,
-    no = TRUE
-  )
-  limma.check <- PackageCheck("limma", error = FALSE)
+  # use ProgressBarSApply or FutureSApply (sequential/parallel processing)
+  my.sapply <- ifelse(test = verbose && future::nbrOfWorkers() ==
+                        1, yes = pbsapply, no = future_sapply)
+  # check if not overflowing (data is NaN)
+  overflow.check <- ifelse(test = is.na(x = suppressWarnings(length(x = data.use[1,
+  ]) * length(x = data.use[1, ]))), yes = FALSE, no = TRUE)
+  # check if limma package available in R session
+  limma.check <- SeuratObject::PackageCheck("limma", error = FALSE)
+  # if data not overflowing and limma package available in R session
   if (limma.check[1] && overflow.check) {
-    p_val <- my.sapply(
-      X = 1:nrow(x = data.use),
-      FUN = function(x) {
-        return(min(2 * min(limma::rankSumTestWithCorrelation(index = j, statistics = data.use[x, ])), 1))
-      }
-    )
-  } else {
-    if (getOption('Seurat.limma.wilcox.msg', TRUE) && overflow.check) {
-      message(
-        "For a more efficient implementation of the Wilcoxon Rank Sum Test,",
-        "\n(default method for FindMarkers) please install the limma package",
-        "\n--------------------------------------------",
-        "\ninstall.packages('BiocManager')",
-        "\nBiocManager::install('limma')",
-        "\n--------------------------------------------",
-        "\nAfter installation of limma, Seurat will automatically use the more ",
-        "\nefficient implementation (no further action necessary).",
-        "\nThis message will be shown once per session"
-      )
+    # calculate p-value with defined sapply function
+    p_val <- my.sapply(X = 1:nrow(x = data.use), FUN = function(x) {
+      return(min(2 * min(limma::rankSumTestWithCorrelation(index = j,
+                                                           statistics = data.use[x, ])), 1))
+    })
+  }
+  else {
+    if (getOption("Seurat.limma.wilcox.msg", TRUE) && overflow.check) {
+      message("For a more efficient implementation of the Wilcoxon Rank Sum Test,",
+              "\n(default method for FindMarkers) please install the limma package",
+              "\n--------------------------------------------",
+              "\ninstall.packages('BiocManager')", "\nBiocManager::install('limma')",
+              "\n--------------------------------------------",
+              "\nAfter installation of limma, Seurat will automatically use the more ",
+              "\nefficient implementation (no further action necessary).",
+              "\nThis message will be shown once per session")
       options(Seurat.limma.wilcox.msg = FALSE)
     }
     group.info <- data.frame(row.names = c(cells.1, cells.2))
@@ -2324,12 +2361,32 @@ WilcoxDETest <- function(
     group.info[cells.2, "group"] <- "Group2"
     group.info[, "group"] <- factor(x = group.info[, "group"])
     data.use <- data.use[, rownames(x = group.info), drop = FALSE]
-    p_val <- my.sapply(
-      X = 1:nrow(x = data.use),
-      FUN = function(x) {
-        return(wilcox.test(data.use[x, ] ~ group.info[, "group"], ...)$p.value)
-      }
-    )
+    p_val <- my.sapply(X = 1:nrow(x = data.use), FUN = function(x) {
+      return(wilcox.test(data.use[x, ] ~ group.info[,
+                                                    "group"], ...)$p.value)
+    })
   }
-  return(data.frame(p_val, row.names = rownames(x = data.use)))
+
+  ### CUSTOM CODE for calculating p-value for non-zero expression cells
+  message("WARNING: Running custom extended Seurat:::WilcoxDETest...")
+  # use only non-zero expression data needed for group comparison
+  data.use <- data.use.orig[, c(cells.1, cells.2), drop = FALSE]
+
+  if (limma.check[1] && overflow.check) {
+    # calculate p-value with defined sapply function
+    nz_p_val <- my.sapply(X = 1:nrow(x = data.use), FUN = function(x) {
+      return(min(2 * min(limma::rankSumTestWithCorrelation(index = seq_len(sum(names(data.use[x,][data.use[x,] > 0]) %in% cells.1)),
+                                                           statistics = data.use[x,][data.use[x,] > 0]
+      )), 1))
+    })
+  }
+  else {
+    data.use <- data.use[, rownames(x = group.info), drop = FALSE]
+    nz_p_val <- my.sapply(X = 1:nrow(x = data.use), FUN = function(x) {
+      return(wilcox.test(data.use[x, ] ~ group.info[,
+                                                    "group"], ...)$p.value)
+    })
+  }
+
+  return(data.frame(p_val, nz_p_val, row.names = rownames(x = data.use)))
 }
